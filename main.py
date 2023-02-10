@@ -3,15 +3,19 @@ Project: Parse Coins (on aiohttp 3.8.3, Python 3.10)
 
 File: main
 
-Version: 2.9
+Python version: 3.10
 """
 
 import asyncio
-import pprint
 import aiohttp
+import time
+import random
 
-from lxml.html import etree
-from random import choice
+from lxml.html import HtmlElement, document_fromstring
+from decimal import *
+
+# 6 digits precision
+getcontext().prec = 6
 
 
 class App:
@@ -37,11 +41,13 @@ class App:
         Object initializer
         """
 
-        self.data: dict = {}
-        self.p: etree.HTMLParser = etree.HTMLParser()
-        self.web_sites: zip = zip(web_sites_labels, to_find_on_web_site, urls)
+        self.connector: aiohttp.TCPConnector | None = None
+        self.data: dict = {key: [] for key in web_sites_labels}
+        self.session: aiohttp.ClientSession | None = None
+        self.web_sites: list = list(zip(web_sites_labels, to_find_on_web_site, urls))
 
-    async def parser(self, html: str, to_find: str) -> list:
+    @staticmethod
+    async def parser(html: str, to_find: str) -> list[HtmlElement]:
         """
 
         :param html: str
@@ -49,93 +55,106 @@ class App:
         :return: list
         """
 
-        tree: etree.HTML = etree.HTML(html, parser=self.p)
-        objects: list = tree.xpath(to_find)
+        tree: HtmlElement = document_fromstring(html)
+        objects: list[HtmlElement] = tree.xpath(to_find)
 
         return objects
 
-    @staticmethod
-    async def fetch(session: aiohttp.ClientSession, url: str) -> str:
+    async def fetch(self, url: str) -> str:
         """
 
-        :param session: new aiohttp.ClientSession,
         :param url: str of URL to parse
         :return: str of response – HTML page
         """
 
-        async with session.get(url) as response:
-            return await response.text(encoding="utf-8")
+        # Let's try and avoid caching, which is a huge problem
+        new_url = f"{url}?timestamp={int(time.time())}?random={random.randint(0, 100)}"
+        # --------------------------------------------
 
-    async def start_session(self, to_find: str, url: str) -> list[str]:
+        async with self.session.get(new_url) as response:
+            return await response.text()
+
+    async def pages(self, url: str, to_find: str) -> list:
         """
-        Instantiate new session
-
-        :param to_find: str,
-        :param url: str,
-        :return: list of strings
-        """
-
-        async with aiohttp.ClientSession(headers=choice(self.HEADERS)) as session:
-            html: str = await self.fetch(session, url)
-
-            return await self.parser(html, to_find)
-
-    async def pages(self) -> None:
-        """
-        Collect data to object property "data"
+        Collect data and parse html
 
         :return: None
         """
 
-        for web_site, to_find_XPATH, this_url in self.web_sites:
-            self.data[web_site]: list[str] = await self.start_session(to_find=to_find_XPATH,
-                                                                      url=this_url)
+        html: str = await self.fetch(url)
+
+        return await self.parser(html, to_find)
+
+    async def get_hourly_max(self, current_time: int, data_key: str) -> Decimal | bool:
+        out = False
+        try:
+
+            # Only keep last hour data to save memory, since no other instructions available
+            self.data[data_key] = list(filter(lambda x: x[0] > current_time - 3600,
+                                              self.data[data_key]))
+            # ------------------------------------------------------------------------------
+
+            out = max(map(lambda x: x[1], self.data[data_key]))
+
+        except ValueError:
+            pass
+
+        finally:
+            return out
 
     @staticmethod
-    def convert(arg: bytes, source: str) -> str:
-        """
+    async def strip_string_by_separator(string: str, sep: str) -> str:
+        return string.split(sep)[0]
 
-        :param arg: bytes of etree.tostring() to be converted to string value,
-        :param source: string value – label of web_site,
-        :return: string value
-        """
-
-        arg: str = str(arg, encoding="utf-8")
-        x: str = arg[arg.find(">") + 1:arg.find("</")]
-        to_find: str = """data-bn-type="link" href="/en/trade/"""
-        ind: int = x.find(to_find) + len(to_find)
-
-        if "binance" in source:
-            return x[ind:x.find("?")] if to_find in x else ""
-        else:
-            return x
-
-    def main(self) -> dict[str, set]:
+    async def main(self) -> None:
         """
         Main function
 
         :return: tuple of two sets – for each key listed in self.__init__
         """
 
-        asyncio.run(self.pages())
+        self.connector = aiohttp.TCPConnector(use_dns_cache=False, force_close=True)
 
-        for key in self.data:
-            self.data.update({key: set(map(lambda x: self.convert(etree.tostring(x),
-                                                                  source=key),
-                                           self.data[key]))})
+        async with aiohttp.ClientSession(headers=random.choice(self.HEADERS),
+                                         connector=self.connector,
+                                         connector_owner=False) as session:
 
-        return self.data
+            print("[START] Started collecting data")
+            self.session = session
+
+            while True:
+                for web_site, to_find_tag, this_url in self.web_sites:
+                    result = await self.pages(to_find=to_find_tag,
+                                              url=this_url)
+                    to_show_result = Decimal(await self.strip_string_by_separator(result[0].text_content(), " |"))
+                    current_t = int(time.time())
+                    self.data[web_site].append((current_t, to_show_result))
+
+                    if m := await self.get_hourly_max(current_t, web_site):
+                        if (m - to_show_result) / m > 0.01:
+                            print("[MESSAGE] Current price is 1% lower than hourly max")
+
+                    print(f"[+] Last price: {to_show_result} for {web_site} at {current_t} UTC")
 
 
 if __name__ == "__main__":
-    # Currently, Coinmarketcap fails to be parsed
-    # It is only here as proof-of-concept
+    # To test multiple
+    # new_app_instance_dict = {"web_sites_labels": ("binance_futures", "binance_futures2",),
+    #                          "to_find_on_web_site": ("//head/title", "//head/title",),
+    #                          "urls": ("https://www.binance.com/en/futures/XRPUSDT",
+    #                                   "https://www.binance.com/en/futures/BNBUSDT",)}
+    new_app_instance_dict = {"web_sites_labels": ("XRP/USDT",),
+                             "to_find_on_web_site": ("//head/title",),
+                             "urls": ("https://www.binance.com/en/futures/XRPUSDT",)}
 
-    new_app_instance = App(web_sites_labels=("binance_listed", "coinmarketcap"),
-                           to_find_on_web_site=("""//div[@class="css-vlibs4"]""",
-                                                """//*[@class="sc-1eb5slv-0 gGIpIK coin-item-symbol"]"""),
-                           urls=("https://www.binance.com/en/markets/newListing",
-                                 "https://coinmarketcap.com/new/"))
-    result = new_app_instance.main()
+    new_app_instance = App(**new_app_instance_dict)
+    try:
+        asyncio.run(new_app_instance.main())
 
-    pprint.pprint(result)
+    except (KeyboardInterrupt,
+            RuntimeError) as error:
+        print(error)
+
+    finally:
+        print("[+] Closing loop")
+        print("[END]")
