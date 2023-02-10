@@ -2,8 +2,6 @@
 Project: Parse Coins (on aiohttp 3.8.3, Python 3.10)
 
 File: main
-
-Python version: 3.10
 """
 
 import asyncio
