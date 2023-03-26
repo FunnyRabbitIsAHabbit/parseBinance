@@ -10,7 +10,7 @@ import time
 import random
 
 from lxml.html import HtmlElement, document_fromstring
-from decimal import *
+from decimal import Decimal, getcontext
 
 # 6 digits precision
 getcontext().prec = 6
